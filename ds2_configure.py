@@ -175,6 +175,10 @@ def parse_ec2_userdata():
     parser.add_argument("--release", action="store", type=str, dest="release")
     # Option that forces the rpc binding to the internal IP address of the instance
     parser.add_argument("--rpcbinding", action="store_true", dest="rpcbinding", default=False)
+    # How to make use of EBS if available. unused/data/commitlog/all
+    parser.add_argument("--preferred-ebs", action="store", type=str, dest="ebs", default="data")
+    # How to make use of ephemeral store. unused/data/commitlog/all
+    parser.add_argument("--preferred-ephemeral", action="store", type=str, dest="ephemeral", default="commitlog")
 
     # Option for multi-region
     parser.add_argument("--multiregion", action="store_true", dest="multiregion", default=False)
@@ -251,6 +255,18 @@ def parse_ec2_userdata():
                 conf.set_config("AMI", "Type", "Enterprise")
             else:
                 exit_path("Invalid --version (-v) argument.")
+
+    valid_block_options = ["unused", "data", "commitlog", "all" ]
+    # non-fatal. Just take it out of the pool
+    if not options.ebs in valid_block_options:
+        logger.error("Invalid option for EBS placement: %s"%(options.ebs))
+        options.ebs = "unused"
+    if not options.ephemeral in valid_block_options:
+        logger.error("Invalid option for ephemeral placement: %s"%(options.ephemeral))
+        options.ephemeral = "unused"
+
+    conf.set_config("AMI", "ebs_preferred_use", options.ebs)
+    conf.set_config("AMI", "ephemeral_preferred_use", options.ephemeral)
 
 def use_ec2_userdata():
     if not options:

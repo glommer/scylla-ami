@@ -1,0 +1,118 @@
+#!/usr/bin/env python
+import urllib2
+import urllib
+import re
+import subprocess
+
+import logger
+import conf
+
+raid_script="/usr/lib/scylla/scylla_raid_setup"
+raid_device = "/dev/md%d"
+scylla_directory="/var/lib/scylla/%s"
+
+def curl_instance_data(url):
+    while True:
+        try:
+            req = urllib2.Request(url)
+            return req
+        except urllib2.HTTPError:
+            logger.info("Failed to grab %s..." % url)
+            time.sleep(5)
+
+def config_array(type, disks, role, mdidx):
+    # Is it already constucted
+    lines = file("/proc/mdstat", "ro").readlines()
+    disks.sort()
+    for l in lines:
+        r = re.compile(r"xvd\w")
+        matches = r.findall(l)
+        if not matches:
+            continue
+        matches.sort()
+        if matches == disks:
+            dev = re.search(r"^md\w+", l).group()
+            logger.info("Found existing RAID %s, will mount it"%(dev))
+            mnt = ["mount", "-o", "noatime", "/dev/%s"%(dev), scylla_directory%(role)]
+            subprocess.call(mnt)
+            return
+    logger.info("RAID Array containing %s not found. Creating..."%(str(disks)))
+    disk_devs = map(lambda x: "/dev/%s"%(x), disks)
+    call = [raid_script, "--raiddev", raid_device%(mdidx), "--disks", ",".join(disk_devs) ]
+    call += [ "--mount-point", scylla_directory%(role) ]
+    subprocess.call(call)
+
+def xenify(devname):
+    req = curl_instance_data('http://169.254.169.254/latest/meta-data/block-device-mapping/' + devname)
+    return urllib2.urlopen(req).read().replace("sd", "xvd")
+
+def read_role(t):
+    r = conf.get_config("AMI", t + "_preferred_use")
+    if r == "all":
+        return ""
+    return r
+
+def get_disk_bundles():
+    # define preferred disk roles. We'll see soon if we can respect them.
+    role = {}
+    role["ebs"] = read_role("ebs")
+    role["ephemeral"] = read_role("ephemeral")
+    # both set to unused - can't respect that. Will set both to all
+    # in this case. If only one of them is present we'll pick it.
+    # otherwise we'll go to our default
+    if role["ebs"] == role["ephemeral"] == "unused":
+        role["ebs"] = ""
+        role["ephemeral"] = ""
+
+    # Find disk assignments
+    try:
+        req = curl_instance_data('http://169.254.169.254/latest/meta-data/block-device-mapping/')
+        devmap = urllib2.urlopen(req).read()
+        typemap = {}
+        devname = re.compile("^\D+")
+        for dev in devmap.split("\n"):
+            if dev == "ami" or dev == "root":
+                continue
+
+            t = devname.match(dev).group()
+            if role[t] == "unused":
+                continue
+
+            if not typemap.has_key(t):
+                typemap[t] = []
+            typemap[t] += [ xenify(dev) ]
+
+        # One of the desired types not found: The other type has it all
+        if not typemap.has_key("ebs"):
+            role["ephemeral"] = ""
+        if not typemap.has_key("ephemeral"):
+            role["ebs"] = ""
+
+        # Both types configured for the same role, and both present. Can't respect that, so
+        # pick our default
+        if role["ebs"] == role["ephemeral"]:
+            role["ebs"] = "data"
+            role["ephemeral"] = "commitlog"
+
+        # If one type configured for all, the other for a specifid role, and both present:
+        # That's valid and sane: respect that and mount one on top of the other. We just need
+        # make sure that the root is mounted first.
+        order = []
+        for t in typemap.keys():
+            if role[t] == "":
+                order = [t] + order
+            else:
+                order += [t]
+
+        mdidx = 0
+        for t in order:
+            config_array(t, typemap[t], role[t], mdidx)
+            mdidx += 1
+
+    except Exception, e:
+        logger.info("Couldn't fetch block device mapping: %s" % e)
+        logger.info("Generating defaults...")
+        # FIXME: write this
+
+if __name__ == "__main__":
+    get_disk_bundles()
